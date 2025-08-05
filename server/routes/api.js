@@ -13,13 +13,10 @@ const normalizeSymptoms = (symptomsInput) => {
 };
 
 const getDiseaseFromGemini = async (symptoms, gender, age, previouslyFaced, howLongAgo, symptomDuration) => {
-    // Construct a detailed prompt for the Gemini API
+    // Prompt is now slightly less specific, as we'll do post-processing
     let prompt = `Analyze the following user's health information and determine the most probable medical condition or disease. 
     Provide only the disease name, without any additional text or explanation. 
     If you cannot determine a specific disease, respond with "General consultation".
-
-    When analyzing, pay very close attention to the user's gender, age, and history.
-    Specifically, if 'stomach pain' or 'abdominal pain' is a symptom for a female user, prioritize considering gynecological, reproductive, or menstrual issues (like Dysmenorrhea or Endometriosis) if the recurrence or duration aligns with menstrual cycles (e.g., 'monthly', 'last month'). Also consider urinary tract issues. Only if these are less likely, then consider gastrointestinal causes.
 
     User Information:
     - Symptoms: ${symptoms}
@@ -79,6 +76,60 @@ const getDiseaseFromGemini = async (symptoms, gender, age, previouslyFaced, howL
     return "General consultation";
 };
 
+// --- NEW: Post-processing function to refine LLM diagnosis ---
+const postProcessDiagnosis = (llmDiagnosis, symptoms, gender, age, previouslyFaced, howLongAgo, symptomDuration) => {
+    let finalDiagnosis = llmDiagnosis;
+
+    const lowerCaseSymptoms = symptoms.toLowerCase();
+    const lowerCaseGender = gender ? gender.toLowerCase() : '';
+    const lowerCasePreviouslyFaced = previouslyFaced ? previouslyFaced.toLowerCase() : '';
+    const lowerCaseHowLongAgo = howLongAgo ? howLongAgo.toLowerCase() : '';
+    const lowerCaseSymptomDuration = symptomDuration ? symptomDuration.toLowerCase() : '';
+
+    // Rule 1: Female-specific abdominal/stomach pain, recurrent, possibly menstrual
+    if (lowerCaseGender === 'female' && 
+        (lowerCaseSymptoms.includes('stomach pain') || lowerCaseSymptoms.includes('abdominal pain')) &&
+        lowerCasePreviouslyFaced === 'yes' &&
+        (lowerCaseHowLongAgo.includes('month') || lowerCaseHowLongAgo.includes('cycle') || lowerCaseHowLongAgo.includes('period'))
+    ) {
+        // If LLM gave a general GI diagnosis, refine it
+        if (finalDiagnosis.toLowerCase().includes('gastroenterology') || finalDiagnosis.toLowerCase().includes('general consultation')) {
+            finalDiagnosis = "Menstrual Disorder / Gynecological Concern";
+        }
+    }
+    // Rule 2: Pediatric conditions based on age
+    if (age && age < 12) {
+        if (finalDiagnosis.toLowerCase().includes("flu")) finalDiagnosis = "Pediatric Flu";
+        if (finalDiagnosis.toLowerCase().includes("fever")) finalDiagnosis = "Childhood Fever";
+        if (finalDiagnosis.toLowerCase().includes("gastroenterology")) finalDiagnosis = "Pediatric Gastroenteritis";
+    }
+    // Rule 3: Geriatric conditions based on age
+    else if (age && age >= 60) {
+        if (finalDiagnosis.toLowerCase().includes("cardiac issue")) finalDiagnosis = "Geriatric Cardiac Care";
+        if (finalDiagnosis.toLowerCase().includes("orthopedic")) finalDiagnosis = "Age-related Orthopedic Issue";
+        if (finalDiagnosis.toLowerCase().includes("diabetes")) finalDiagnosis = "Type 2 Diabetes (Geriatric)";
+    }
+    // Rule 4: Chronic based on duration/history
+    if (lowerCasePreviouslyFaced === 'yes' && (lowerCaseHowLongAgo.includes("year") || lowerCaseHowLongAgo.includes("months"))) {
+        if (finalDiagnosis.toLowerCase().includes("migraine")) finalDiagnosis = "Recurrent Migraine";
+        if (finalDiagnosis.toLowerCase().includes("diabetes")) finalDiagnosis = "Chronic Diabetes Management";
+        if (finalDiagnosis.toLowerCase().includes("cardiac issue")) finalDiagnosis = "Chronic Cardiac Condition";
+    }
+    // Rule 5: Persistent symptoms
+    if (lowerCaseSymptomDuration.includes("weeks") || lowerCaseSymptomDuration.includes("month")) {
+        if (finalDiagnosis.toLowerCase().includes("flu")) finalDiagnosis = "Persistent Flu Symptoms";
+        if (finalDiagnosis.toLowerCase().includes("cough")) finalDiagnosis = "Chronic Cough";
+        if (finalDiagnosis.toLowerCase().includes("headache")) finalDiagnosis = "Persistent Headaches";
+    }
+
+    // You can add more specific post-processing rules here
+    // Example: if (lowerCaseSymptoms.includes('burning urination') && lowerCaseGender === 'female') finalDiagnosis = "Urinary Tract Infection";
+
+    return finalDiagnosis;
+};
+
+
+// POST /analyzeSymptoms
 router.post('/analyzeSymptoms', async (req, res) => {
     const { symptoms, gender, age, previouslyFaced, howLongAgo, symptomDuration } = req.body;
     
@@ -86,7 +137,8 @@ router.post('/analyzeSymptoms', async (req, res) => {
         return res.status(400).json({ error: "Symptoms are required." });
     }
 
-    const probableDisease = await getDiseaseFromGemini(
+    // 1. Get initial diagnosis from Gemini
+    const initialProbableDisease = await getDiseaseFromGemini(
         symptoms,
         gender,
         age,
@@ -95,44 +147,99 @@ router.post('/analyzeSymptoms', async (req, res) => {
         symptomDuration
     );
 
-    res.json({ disease: probableDisease });
+    // 2. Post-process the diagnosis based on specific rules
+    const finalProbableDisease = postProcessDiagnosis(
+        initialProbableDisease,
+        symptoms,
+        gender,
+        age,
+        previouslyFaced,
+        howLongAgo,
+        symptomDuration
+    );
+
+    res.json({ disease: finalProbableDisease });
 });
 
-router.get('/hospitals', (req, res) => {
+// GET /hospitals (uses Google Places API)
+const getHospitalsFromGoogle = async (disease, city, scheme, insurance) => {
+    const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY; // Get Google API key from environment variables
+    if (!GOOGLE_API_KEY) {
+        console.error("GOOGLE_API_KEY is not set in environment variables.");
+        return [];
+    }
+
+    const query = `hospitals in ${city} for ${disease}`;
+    const googleApiUrl = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(query)}&type=hospital&key=${GOOGLE_API_KEY}`;
+
+    const maxRetries = 3;
+    let retries = 0;
+    while (retries < maxRetries) {
+        try {
+            const response = await fetch(googleApiUrl);
+
+            if (!response.ok) {
+                const errorData = await response.json();
+                console.error(`Google Places API error (Status: ${response.status}):`, errorData);
+                throw new Error(`Google Places API responded with status ${response.status}`);
+            }
+
+            const data = await response.json();
+            if (data.results) {
+                // Mock filtering for scheme and insurance as Google Places API doesn't provide this
+                let filteredResults = data.results.map(place => ({
+                    id: place.place_id,
+                    name: place.name,
+                    address: place.formatted_address,
+                    city: city, // Use the requested city
+                    diseasesTreated: [disease, "General consultation"], // Assume they treat the queried disease and general cases
+                    schemesAccepted: ["Arogyasri", "PMJAY"], // Mock common schemes
+                    insurancePartners: ["Aetna", "Cigna", "UnitedHealthcare", "Bajaj Allianz", "HDFC Ergo", "Star Health"] // Mock common partners
+                }));
+
+                // Apply mock filtering based on user input for scheme/insurance
+                if (scheme) {
+                    const lowerCaseScheme = scheme.toLowerCase();
+                    filteredResults = filteredResults.filter(hospital =>
+                        hospital.schemesAccepted.some(s => s.toLowerCase().includes(lowerCaseScheme))
+                    );
+                }
+                if (insurance) {
+                    const lowerCaseInsurance = insurance.toLowerCase();
+                    filteredResults = filteredResults.filter(hospital =>
+                        hospital.insurancePartners.some(p => p.toLowerCase().includes(lowerCaseInsurance))
+                    );
+                }
+
+                // Limit to top 10 results for brevity
+                return filteredResults.slice(0, 10); 
+            } else {
+                console.warn("Google Places API response unexpected:", data);
+                return [];
+            }
+        } catch (error) {
+            console.error(`Error calling Google Places API (retry ${retries + 1}/${maxRetries}):`, error);
+            retries++;
+            await new Promise(resolve => setTimeout(resolve, Math.pow(2, retries) * 1000));
+        }
+    }
+    console.error("Max retries reached for Google Places API call.");
+    return [];
+};
+
+
+router.get('/hospitals', async (req, res) => {
     const { disease, city, scheme, insurance } = req.query;
 
-    let filteredHospitals = hospitals;
-
-    if (disease) {
-        const lowerCaseDisease = disease.toLowerCase();
-        filteredHospitals = filteredHospitals.filter(hospital =>
-            hospital.diseasesTreated.some(d => d.toLowerCase().includes(lowerCaseDisease))
-        );
-    }
-    
-    if (city) {
-        const lowerCaseCity = city.toLowerCase();
-        filteredHospitals = filteredHospitals.filter(hospital =>
-            hospital.city.toLowerCase() === lowerCaseCity
-        );
+    if (!city) {
+        return res.status(400).json({ error: "City is required for hospital search." });
     }
 
-    if (scheme) {
-        const lowerCaseScheme = scheme.toLowerCase();
-        filteredHospitals = filteredHospitals.filter(hospital =>
-            hospital.schemesAccepted.some(s => s.toLowerCase() === lowerCaseScheme)
-        );
-    }
+    const dynamicHospitals = await getHospitalsFromGoogle(disease, city, scheme, insurance);
 
-    if (insurance) {
-        const lowerCaseInsurance = insurance.toLowerCase();
-        filteredHospitals = filteredHospitals.filter(hospital =>
-            hospital.insurancePartners.some(p => p.toLowerCase() === lowerCaseInsurance)
-        );
-    }
-
-    res.json(filteredHospitals);
+    res.json(dynamicHospitals);
 });
+
 
 router.post('/addHospital', (req, res) => {
     const newHospital = {
