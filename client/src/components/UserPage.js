@@ -20,12 +20,12 @@ function UserPage() {
 
         try {
             // Step 1: Analyze symptoms
-            const symptomResponse = await axios.post('http://localhost:5000/api/analyzeSymptoms', { symptoms });
+            const symptomResponse = await axios.post('https://aarogyalink.onrender.com/api/analyzeSymptoms', { symptoms });
             const probableDisease = symptomResponse.data.disease;
             setDisease(probableDisease);
             
             // Step 2: Fetch hospitals based on disease, city, scheme, and insurance
-            const hospitalResponse = await axios.get('http://localhost:5000/api/hospitals', {
+            const hospitalResponse = await axios.get('https://aarogyalink.onrender.com/api/hospitals', {
                 params: {
                     disease: probableDisease,
                     city,

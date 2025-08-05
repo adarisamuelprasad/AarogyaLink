@@ -15,7 +15,7 @@ function AdminPage() {
 
     const fetchHospitals = async () => {
         try {
-            const response = await axios.get('http://localhost:5000/api/allHospitals');
+            const response = await axios.get('https://aarogyalink.onrender.com/api/allHospitals');
             setHospitals(response.data);
         } catch (error) {
             console.error("Error fetching hospitals:", error);
@@ -44,7 +44,7 @@ function AdminPage() {
                 insurancePartners: formData.insurancePartners.split(',').map(s => s.trim())
             };
             
-            await axios.post('http://localhost:5000/api/addHospital', newHospital);
+            await axios.post('https://aarogyalink.onrender.com/api/addHospital', newHospital);
             setMessage("Hospital added successfully!");
             setFormData({
                 name: '', address: '', city: '', diseasesTreated: '', schemesAccepted: '', insurancePartners: ''
