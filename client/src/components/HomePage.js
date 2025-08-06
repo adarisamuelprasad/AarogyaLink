@@ -38,8 +38,8 @@ function HomePage() {
         };
 
         try {
-            // --- FIX: Hardcoding the local server URL directly ---
-            const apiBaseUrl = 'http://localhost:5000'; 
+            // This is the correct line for deployment
+            const apiBaseUrl = process.env.REACT_APP_API_BASE_URL; 
             
             const symptomResponse = await axios.post(`${apiBaseUrl}/api/analyzeSymptoms`, payload);
             
